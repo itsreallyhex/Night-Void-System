@@ -1,6 +1,6 @@
 # Night Void System — Discord Bot
 
-A single-guild Discord bot for the **Night Void System** community. It handles
+A single-guild Discord bot for the [Night Void Server](https://discord.gg/788VYYWNDF) community. It handles
 support tickets, a credit economy (earned by chatting or sitting in voice),
 redeemable codes, a role shop, paid minor services, reviews, and
 announcements. User-facing text is Saudi Arabic; the code and docs are
@@ -229,3 +229,8 @@ a store that's already running.
 - Role assignments that fail on a permission error **auto-refund** the credits.
 - The bot logs failures with context and never crashes on a single failed action.
 - No public port is needed — run it as a background worker (`Procfile`: `worker: python bot.py`).
+
+---
+
+## License
+[MIT](https://github.com/itsreallyhex/Night-Void-System/blob/main/LICENSE)
