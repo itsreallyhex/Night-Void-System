@@ -6,6 +6,7 @@ as private threads or dedicated channels (TICKET_USE_THREADS). Closing a ticket
 triggers the review system (System 3). User-facing text is Saudi Arabic.
 """
 
+import io
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -21,6 +22,7 @@ log = logging.getLogger("nightvoid.tickets")
 
 OPEN_TICKET_ID = "nv:ticket:open"
 CLOSE_TICKET_ID = "nv:ticket:close"
+ADMIN_MENU_ID = "nv:ticket:admin"
 # Footer marker that identifies the bot's own inactivity warning, so the sweep
 # can tell "the last message is our warning" from real conversation.
 AUTOCLOSE_MARK = "nv:ticket:autoclose-warning"
@@ -157,8 +159,75 @@ class LegacyPanelView(discord.ui.View):
         await self.cog.open_ticket(interaction, "suggest")
 
 
+class CloseReasonModal(discord.ui.Modal, title="إغلاق التذكرة بسبب"):
+    """Prompt the closing admin for a reason, then close with it."""
+
+    reason = discord.ui.TextInput(
+        label="السبب",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=500,
+        placeholder="اكتب سبب إغلاق التذكرة…",
+    )
+
+    def __init__(self, cog: "Tickets", ticket) -> None:
+        super().__init__()
+        self.cog = cog
+        self.ticket = ticket
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog._perform_close(interaction, self.ticket, reason=str(self.reason))
+
+
+class TicketAdminSelect(discord.ui.Select):
+    """The admin actions dropdown, bound to one ticket. Ephemeral and
+    short-lived, so it carries the ticket in memory instead of a custom_id."""
+
+    def __init__(self, cog: "Tickets", ticket) -> None:
+        self.cog = cog
+        self.ticket = ticket
+        options = [
+            discord.SelectOption(
+                label="طلب نسخة من التذكرة", value="copy", emoji="📄",
+                description="نسخة كاملة من المحادثة توصلك خاص",
+            ),
+            discord.SelectOption(
+                label="تذكير العضو", value="remind", emoji="📨",
+                description="منشن وتذكير لصاحب التذكرة",
+            ),
+            discord.SelectOption(
+                label="إغلاق بسبب", value="close", emoji="🔒",
+                description="اكتب سبب وسكّر التذكرة",
+            ),
+        ]
+        super().__init__(
+            placeholder="اختر خيارًا للتذكرة", min_values=1, max_values=1, options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        choice = self.values[0]
+        if choice == "close":
+            # A modal must be the interaction's first response (can't defer first).
+            await interaction.response.send_modal(CloseReasonModal(self.cog, self.ticket))
+            return
+        # The copy transcript can take a moment to build — buy time.
+        await interaction.response.defer(ephemeral=True)
+        if choice == "copy":
+            await self.cog._send_transcript(interaction, self.ticket)
+        elif choice == "remind":
+            await self.cog._remind_member(interaction, self.ticket)
+
+
+class TicketAdminView(discord.ui.View):
+    """Ephemeral holder for the admin actions dropdown (one ticket)."""
+
+    def __init__(self, cog: "Tickets", ticket) -> None:
+        super().__init__(timeout=120)
+        self.add_item(TicketAdminSelect(cog, ticket))
+
+
 class TicketControlView(discord.ui.View):
-    """Persistent in-ticket controls (staff close button)."""
+    """Persistent in-ticket controls (staff close button + admin tools menu)."""
 
     def __init__(self, cog: "Tickets") -> None:
         super().__init__(timeout=None)
@@ -170,6 +239,13 @@ class TicketControlView(discord.ui.View):
     )
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.cog.close_ticket(interaction)
+
+    @discord.ui.button(
+        label="أدوات الإدارة", style=discord.ButtonStyle.secondary,
+        emoji="🛠️", custom_id=ADMIN_MENU_ID,
+    )
+    async def admin_menu(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.cog.open_admin_menu(interaction)
 
 
 class Tickets(commands.Cog):
@@ -458,6 +534,16 @@ class Tickets(commands.Cog):
             )
             return
 
+        await self._perform_close(interaction, ticket)
+
+    async def _perform_close(
+        self, interaction: discord.Interaction, ticket, reason: str | None = None
+    ) -> None:
+        """Close a ticket the caller already resolved: DB row, review request,
+        log entry (with the reason, if any), opener DM, channel cleanup.
+
+        Shared by the 🔒 button (no reason) and the admin 'إغلاق بسبب' menu
+        (reason from the modal)."""
         await interaction.response.send_message("🔒 جاري تسكير التذكرة…", ephemeral=True)
         await self.db.close_ticket(ticket["id"], utilities.utc_now_iso())
 
@@ -466,7 +552,19 @@ class Tickets(commands.Cog):
         if reviews is not None:
             await reviews.request_review(ticket["user_id"], ticket["id"])
 
-        await self._log_closure(interaction.guild, ticket, interaction.user)
+        await self._log_closure(interaction.guild, ticket, interaction.user, reason)
+
+        # Tell the opener why, when a reason was given.
+        if reason:
+            member = interaction.guild.get_member(ticket["user_id"])
+            if member is not None:
+                try:
+                    await member.send(
+                        f"🔒 تذكرتك رقم **#{ticket['id']}** انسكرت.\n"
+                        f"**السبب:** {reason}"
+                    )
+                except discord.HTTPException:
+                    pass
 
         channel = interaction.channel
         try:
@@ -479,10 +577,97 @@ class Tickets(commands.Cog):
         except discord.HTTPException:
             log.exception("Failed to archive/delete ticket channel %s", channel.id)
 
-        log.info("Ticket #%s closed by %s", ticket["id"], interaction.user)
+        log.info(
+            "Ticket #%s closed by %s%s",
+            ticket["id"], interaction.user, f" (reason: {reason})" if reason else "",
+        )
+
+    # ------------------------------------------------------------------ #
+    # Admin tools menu (per-ticket: copy transcript, remind opener, close reason)
+    # ------------------------------------------------------------------ #
+    async def open_admin_menu(self, interaction: discord.Interaction) -> None:
+        """Open the ephemeral admin actions dropdown for this ticket."""
+        if not utilities.is_staff(interaction.user):
+            await interaction.response.send_message(
+                "❌ هذي الأدوات للإدارة فقط.", ephemeral=True
+            )
+            return
+        ticket = await self.db.get_ticket_by_channel(interaction.channel.id)
+        if ticket is None:
+            await interaction.response.send_message(
+                "❌ هذي القناة مو تذكرة مفتوحة.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            "اختر خيارًا للتذكرة:", view=TicketAdminView(self, ticket), ephemeral=True
+        )
+
+    async def _build_transcript(self, channel, ticket) -> str:
+        """Flatten the ticket conversation into a plain-text transcript."""
+        lines = [
+            f"Transcript — Ticket #{ticket['id']} ({ticket['type']})",
+            f"Opener: {ticket['user_id']}",
+            "=" * 60,
+            "",
+        ]
+        async for m in channel.history(limit=1000, oldest_first=True):
+            ts = m.created_at.strftime("%Y-%m-%d %H:%M")
+            lines.append(f"[{ts}] {m.author}: {m.content}")
+            for a in m.attachments:
+                lines.append(f"    [attachment] {a.url}")
+            if m.embeds and not m.content:
+                lines.append("    [embed]")
+        return "\n".join(lines)
+
+    async def _send_transcript(self, interaction: discord.Interaction, ticket) -> None:
+        """DM the requesting admin a full transcript of the ticket; fall back to
+        an ephemeral reply if their DMs are closed. (interaction is deferred.)"""
+        text = await self._build_transcript(interaction.channel, ticket)
+        data = text.encode("utf-8")
+        fname = f"ticket-{ticket['id']}.txt"
+        try:
+            await interaction.user.send(
+                content=f"📄 نسخة تذكرة **#{ticket['id']}**",
+                file=discord.File(io.BytesIO(data), filename=fname),
+            )
+            await interaction.followup.send("✅ وصلتك نسخة التذكرة خاص.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send(
+                content="📄 نسخة التذكرة (ما قدرت أرسل لك خاص):",
+                file=discord.File(io.BytesIO(data), filename=fname),
+                ephemeral=True,
+            )
+
+    async def _remind_member(self, interaction: discord.Interaction, ticket) -> None:
+        """Ping the ticket opener in-channel and best-effort DM them a nudge.
+        (interaction is deferred.)"""
+        opener_id = ticket["user_id"]
+        try:
+            await interaction.channel.send(
+                f"<@{opener_id}> ⏰ تذكير: الإدارة تنتظر ردّك على هالتذكرة."
+            )
+        except discord.HTTPException:
+            log.warning("Could not post reminder ping in ticket %s", ticket["id"])
+
+        dm_ok = False
+        member = interaction.guild.get_member(opener_id)
+        if member is not None:
+            try:
+                await member.send(
+                    f"⏰ تذكير من **{interaction.guild.name}**: عندك تذكرة مفتوحة "
+                    f"(**#{ticket['id']}**) والإدارة تنتظر ردّك."
+                )
+                dm_ok = True
+            except discord.HTTPException:
+                pass
+        await interaction.followup.send(
+            "✅ تم تذكير العضو في التذكرة" + (" وبالخاص." if dm_ok else " (الخاص مقفّل)."),
+            ephemeral=True,
+        )
 
     async def _log_closure(
-        self, guild: discord.Guild, ticket, closer: discord.Member
+        self, guild: discord.Guild, ticket, closer: discord.Member,
+        reason: str | None = None,
     ) -> None:
         if not config.TICKET_LOG_CHANNEL_ID:
             return
@@ -500,6 +685,8 @@ class Tickets(commands.Cog):
         embed.add_field(name="النوع", value=f"{spec['emoji']} {spec['label']}", inline=True)
         embed.add_field(name="فتحها", value=f"<@{ticket['user_id']}>", inline=True)
         embed.add_field(name="سكّرها", value=closer.mention, inline=True)
+        if reason:
+            embed.add_field(name="السبب", value=reason, inline=False)
         try:
             await log_channel.send(embed=embed)
         except discord.Forbidden:
