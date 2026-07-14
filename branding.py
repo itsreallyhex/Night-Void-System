@@ -27,7 +27,7 @@ INFO = discord.Color(0x38BDF8)     # questions, informational embeds
 GOLD = discord.Color(0xFACC15)     # reviews, leaderboard, economy (value/prestige)
 NEUTRAL = discord.Color(0x64748B)  # logs, admin diagnostics (low-attention)
 
-FOOTER = "Night Void Store"
+FOOTER = "Night Void"
 
 
 def logo_file() -> discord.File | None:

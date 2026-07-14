@@ -142,10 +142,11 @@ CREATE TABLE IF NOT EXISTS honeypot_config (
     id                INTEGER PRIMARY KEY CHECK (id = 1),
     channel_id        INTEGER NOT NULL,
     action_type       TEXT    NOT NULL
-        CHECK (action_type IN ('kick', 'ban', 'remove_roles', 'alert_only')),
+        CHECK (action_type IN ('kick', 'ban', 'remove_roles', 'timeout', 'alert_only')),
     embed_message_id  INTEGER,
     trigger_count     INTEGER NOT NULL DEFAULT 0,
-    enabled           INTEGER NOT NULL DEFAULT 1
+    enabled           INTEGER NOT NULL DEFAULT 1,
+    timeout_seconds   INTEGER NOT NULL DEFAULT 86400  -- only used by 'timeout'
 );
 
 -- Roles fully exempt from the honeypot (no deletion, no action, no counter).
@@ -288,6 +289,52 @@ class Database:
             log.warning(
                 "redemptions has duplicate (code, user) rows; per-user "
                 "redemption gate index not created."
+            )
+
+        # honeypot_config created before the 'timeout' action carries a CHECK
+        # constraint that rejects it, and SQLite cannot alter a CHECK — so the
+        # table is rebuilt in place (rename, recreate, copy, drop). Detected by
+        # inspecting the stored CREATE statement; a no-op once rebuilt.
+        async with self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'honeypot_config'"
+        ) as cur:
+            hp = await cur.fetchone()
+        if hp is not None and "'timeout'" not in hp["sql"]:
+            await self.conn.execute(
+                "ALTER TABLE honeypot_config RENAME TO honeypot_config_legacy"
+            )
+            # Must stay in sync with the honeypot_config definition in SCHEMA.
+            await self.conn.execute(
+                """
+                CREATE TABLE honeypot_config (
+                    id                INTEGER PRIMARY KEY CHECK (id = 1),
+                    channel_id        INTEGER NOT NULL,
+                    action_type       TEXT    NOT NULL
+                        CHECK (action_type IN ('kick', 'ban', 'remove_roles', 'timeout', 'alert_only')),
+                    embed_message_id  INTEGER,
+                    trigger_count     INTEGER NOT NULL DEFAULT 0,
+                    enabled           INTEGER NOT NULL DEFAULT 1,
+                    timeout_seconds   INTEGER NOT NULL DEFAULT 86400
+                )
+                """
+            )
+            await self.conn.execute(
+                "INSERT INTO honeypot_config "
+                "(id, channel_id, action_type, embed_message_id, trigger_count, enabled) "
+                "SELECT id, channel_id, action_type, embed_message_id, trigger_count, enabled "
+                "FROM honeypot_config_legacy"
+            )
+            await self.conn.execute("DROP TABLE honeypot_config_legacy")
+
+        # Standard additive path for the new column (covers a honeypot_config
+        # whose CHECK already allowed 'timeout' but predates the column).
+        async with self.conn.execute("PRAGMA table_info(honeypot_config)") as cur:
+            hp_cols = {row["name"] for row in await cur.fetchall()}
+        if "timeout_seconds" not in hp_cols:
+            await self.conn.execute(
+                "ALTER TABLE honeypot_config ADD COLUMN "
+                "timeout_seconds INTEGER NOT NULL DEFAULT 86400"
             )
 
     async def close(self) -> None:
@@ -911,25 +958,38 @@ class Database:
             return await cur.fetchone()
 
     async def upsert_honeypot_config(
-        self, channel_id: int, action_type: str, embed_message_id: int
+        self,
+        channel_id: int,
+        action_type: str,
+        embed_message_id: int,
+        timeout_seconds: int | None = None,
     ) -> None:
         """Create or repoint the single config row (id is hard-pinned to 1).
 
         A re-setup rearms the trap (enabled = 1) but the lifetime
-        trigger_count survives — it's the feature's only record."""
-        if action_type not in ("kick", "ban", "remove_roles", "alert_only"):
+        trigger_count survives — it's the feature's only record.
+        `timeout_seconds=None` keeps the stored duration (or the 24h default
+        on first setup) rather than resetting it."""
+        if action_type not in ("kick", "ban", "remove_roles", "timeout", "alert_only"):
             raise ValueError(f"invalid honeypot action_type: {action_type!r}")
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            raise ValueError(f"timeout_seconds must be positive, got {timeout_seconds}")
+        # timeout_seconds can't go through excluded.*: excluded would carry the
+        # already-COALESCEd insert value (86400 when None) and clobber the
+        # stored duration on every re-setup — hence the second bind parameter.
         await self.conn.execute(
             """
-            INSERT INTO honeypot_config (id, channel_id, action_type, embed_message_id)
-            VALUES (1, ?, ?, ?)
+            INSERT INTO honeypot_config
+                (id, channel_id, action_type, embed_message_id, timeout_seconds)
+            VALUES (1, ?, ?, ?, COALESCE(?, 86400))
             ON CONFLICT(id) DO UPDATE SET
                 channel_id = excluded.channel_id,
                 action_type = excluded.action_type,
                 embed_message_id = excluded.embed_message_id,
+                timeout_seconds = COALESCE(?, timeout_seconds),
                 enabled = 1
             """,
-            (channel_id, action_type, embed_message_id),
+            (channel_id, action_type, embed_message_id, timeout_seconds, timeout_seconds),
         )
         await self.conn.commit()
 
@@ -949,14 +1009,20 @@ class Database:
         )
         await self.conn.commit()
 
-    async def set_honeypot_action(self, action_type: str) -> None:
+    async def set_honeypot_action(
+        self, action_type: str, timeout_seconds: int | None = None
+    ) -> None:
         """Change the configured action. Raises ValueError on an unknown type
-        (defense-in-depth alongside the CHECK constraint)."""
-        if action_type not in ("kick", "ban", "remove_roles", "alert_only"):
+        (defense-in-depth alongside the CHECK constraint).
+        `timeout_seconds=None` leaves the stored duration untouched."""
+        if action_type not in ("kick", "ban", "remove_roles", "timeout", "alert_only"):
             raise ValueError(f"invalid honeypot action_type: {action_type!r}")
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            raise ValueError(f"timeout_seconds must be positive, got {timeout_seconds}")
         await self.conn.execute(
-            "UPDATE honeypot_config SET action_type = ? WHERE id = 1",
-            (action_type,),
+            "UPDATE honeypot_config SET action_type = ?, "
+            "timeout_seconds = COALESCE(?, timeout_seconds) WHERE id = 1",
+            (action_type, timeout_seconds),
         )
         await self.conn.commit()
 

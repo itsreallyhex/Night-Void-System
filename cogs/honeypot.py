@@ -11,6 +11,7 @@ one safe-role list, no guild_id anywhere.
 """
 
 import logging
+from datetime import timedelta
 
 import discord
 from discord import app_commands
@@ -27,6 +28,7 @@ ACTION_LABELS = {
     "kick": "طرد (Kick)",
     "ban": "حظر (Ban)",
     "remove_roles": "سحب الرتب (Remove Roles)",
+    "timeout": "كتم مؤقت (Timeout)",
     "alert_only": "تنبيه فقط (Alert Only)",
 }
 
@@ -34,6 +36,47 @@ ACTION_CHOICES = [
     app_commands.Choice(name=label, value=value)
     for value, label in ACTION_LABELS.items()
 ]
+
+# Discord's hard API cap on communication_disabled_until.
+MAX_TIMEOUT = timedelta(days=28)
+
+
+def _format_duration(seconds: int) -> str:
+    """Render seconds back into the compact form parse_duration accepts."""
+    for unit_seconds, suffix in ((604800, "w"), (86400, "d"), (3600, "h"), (60, "m")):
+        if seconds % unit_seconds == 0:
+            return f"{seconds // unit_seconds}{suffix}"
+    return f"{seconds}s"
+
+
+def _action_label(action_type: str, timeout_seconds: int) -> str:
+    """Display label for an action; timeout carries its duration."""
+    label = ACTION_LABELS.get(action_type, action_type)
+    if action_type == "timeout":
+        label += f" — {_format_duration(timeout_seconds)}"
+    return label
+
+
+async def _parse_timeout_arg(
+    interaction: discord.Interaction, duration: str
+) -> int | None:
+    """Parse a duration option into seconds, replying ephemerally (and
+    returning None) when it's malformed, non-positive, or over Discord's
+    28-day timeout cap."""
+    try:
+        delta = utilities.parse_duration(duration)
+    except ValueError:
+        await interaction.response.send_message(
+            "❌ المدة غير صالحة. اكتب شي مثل `30m` أو `2h` أو `7d`.",
+            ephemeral=True,
+        )
+        return None
+    if delta <= timedelta(0) or delta > MAX_TIMEOUT:
+        await interaction.response.send_message(
+            "❌ أقصى مدة كتم يسمح فيها ديسكورد **28 يوم**.", ephemeral=True
+        )
+        return None
+    return int(delta.total_seconds())
 
 
 class Honeypot(commands.Cog):
@@ -61,7 +104,12 @@ class Honeypot(commands.Cog):
     # Tracking embed
     # ------------------------------------------------------------------ #
     def _build_embed(
-        self, channel_id: int, action_type: str, enabled: bool, count: int
+        self,
+        channel_id: int,
+        action_type: str,
+        enabled: bool,
+        count: int,
+        timeout_seconds: int,
     ) -> discord.Embed:
         # Deliberately no timestamp and no per-incident detail: the counter is
         # the entire record this feature keeps.
@@ -73,7 +121,7 @@ class Honeypot(commands.Cog):
         embed.add_field(name="القناة", value=f"<#{channel_id}>", inline=True)
         embed.add_field(
             name="الإجراء",
-            value=ACTION_LABELS.get(action_type, action_type),
+            value=_action_label(action_type, timeout_seconds),
             inline=True,
         )
         embed.add_field(
@@ -99,7 +147,11 @@ class Honeypot(commands.Cog):
             )
             return
         embed = self._build_embed(
-            row["channel_id"], row["action_type"], bool(row["enabled"]), count
+            row["channel_id"],
+            row["action_type"],
+            bool(row["enabled"]),
+            count,
+            row["timeout_seconds"],
         )
         if row["embed_message_id"]:
             try:
@@ -156,15 +208,16 @@ class Honeypot(commands.Cog):
         except (discord.Forbidden, discord.HTTPException) as exc:
             log.warning("Honeypot: could not delete trigger message: %s", exc)
 
-        await self._apply_action(member, row["action_type"])
+        await self._apply_action(member, row)
 
         # The counter bump + embed edit is the only record of the trigger.
         count = await self.db.increment_honeypot_counter()
         await self._update_embed(row, count)
 
-    async def _apply_action(self, member: discord.Member, action: str) -> None:
+    async def _apply_action(self, member: discord.Member, row) -> None:
         """Apply the configured action, try_add_role-style: log any permission
         or hierarchy failure and continue — the counter still increments."""
+        action = row["action_type"]
         guild = member.guild
         try:
             if action == "kick":
@@ -190,6 +243,13 @@ class Honeypot(commands.Cog):
                     await member.remove_roles(
                         *roles, reason="Honeypot channel trigger"
                     )
+            elif action == "timeout":
+                # Duration is validated (positive, <= 28d) at command time,
+                # so no clamping is needed here.
+                await member.timeout(
+                    timedelta(seconds=row["timeout_seconds"]),
+                    reason="Honeypot channel trigger",
+                )
             # alert_only: nothing beyond the embed counter bump.
         except discord.Forbidden:
             log.error(
@@ -206,8 +266,9 @@ class Honeypot(commands.Cog):
     )
     @app_commands.default_permissions(administrator=True)
     @app_commands.describe(
-        channel="القناة اللي تصير مصيدة",
-        action="الإجراء اللي يصير على أي عضو يرسل فيها",
+        channel="القناة اللي بتصير مصيدة",
+        action="وش يصير لأي عضو يرسل فيها",
+        duration="مدة الكتم إذا اخترت Timeout — مثل 30m أو 2h أو 7d (الافتراضي يوم)",
     )
     @app_commands.choices(action=ACTION_CHOICES)
     @utilities.owner_only()
@@ -216,13 +277,25 @@ class Honeypot(commands.Cog):
         interaction: discord.Interaction,
         channel: discord.TextChannel,
         action: app_commands.Choice[str],
+        duration: str | None = None,
     ) -> None:
+        timeout_seconds: int | None = None
+        if duration is not None:
+            timeout_seconds = await _parse_timeout_arg(interaction, duration)
+            if timeout_seconds is None:
+                return
         # Re-setup keeps the lifetime counter: read it before overwriting so
-        # the freshly posted embed doesn't show 0 on an established trap.
+        # the freshly posted embed doesn't show 0 on an established trap. The
+        # stored timeout duration survives a re-setup too, unless overridden.
         existing = await self.db.get_honeypot_config()
         count = existing["trigger_count"] if existing else 0
+        effective_timeout = timeout_seconds or (
+            existing["timeout_seconds"] if existing else 86400
+        )
 
-        embed = self._build_embed(channel.id, action.value, True, count)
+        embed = self._build_embed(
+            channel.id, action.value, True, count, effective_timeout
+        )
         try:
             message = await channel.send(embed=embed)
         except (discord.Forbidden, discord.HTTPException):
@@ -233,17 +306,19 @@ class Honeypot(commands.Cog):
             )
             return
 
-        await self.db.upsert_honeypot_config(channel.id, action.value, message.id)
+        await self.db.upsert_honeypot_config(
+            channel.id, action.value, message.id, timeout_seconds
+        )
         await self._refresh_cache()
         await interaction.response.send_message(
             f"✅ تجهزت المصيدة في {channel.mention} — "
-            f"الإجراء: **{ACTION_LABELS[action.value]}**.",
+            f"الإجراء: **{_action_label(action.value, effective_timeout)}**.",
             ephemeral=True,
         )
         log.info("Honeypot configured: channel=%s action=%s", channel.id, action.value)
 
     @app_commands.command(
-        name="honeypot-status", description="اعرض حالة المصيدة (للمالك فقط)."
+        name="honeypot-status", description="شوف وش وضع المصيدة (للمالك فقط)."
     )
     @app_commands.default_permissions(administrator=True)
     @utilities.owner_only()
@@ -258,7 +333,7 @@ class Honeypot(commands.Cog):
         safe = " ".join(f"<@&{rid}>" for rid in safe_ids) or "لا يوجد"
         await interaction.response.send_message(
             f"**القناة:** <#{row['channel_id']}>\n"
-            f"**الإجراء:** {ACTION_LABELS.get(row['action_type'], row['action_type'])}\n"
+            f"**الإجراء:** {_action_label(row['action_type'], row['timeout_seconds'])}\n"
             f"**الحالة:** {'🟢 مفعّل' if row['enabled'] else '🔴 معطّل'}\n"
             f"**عدد التفعيلات:** {row['trigger_count']:,}\n"
             f"**الرتب المستثناة:** {safe}",
@@ -266,7 +341,7 @@ class Honeypot(commands.Cog):
         )
 
     @app_commands.command(
-        name="honeypot-enable", description="فعّل المصيدة (للمالك فقط)."
+        name="honeypot-enable", description="شغّل المصيدة (للمالك فقط)."
     )
     @app_commands.default_permissions(administrator=True)
     @utilities.owner_only()
@@ -274,7 +349,7 @@ class Honeypot(commands.Cog):
         await self._set_enabled(interaction, True, "✅ المصيدة اشتغلت.")
 
     @app_commands.command(
-        name="honeypot-disable", description="عطّل المصيدة (للمالك فقط)."
+        name="honeypot-disable", description="وقّف المصيدة (للمالك فقط)."
     )
     @app_commands.default_permissions(administrator=True)
     @utilities.owner_only()
@@ -303,13 +378,13 @@ class HoneypotSafeRoles(app_commands.Group):
     def __init__(self, cog: Honeypot) -> None:
         super().__init__(
             name="honeypot-safe-roles",
-            description="إدارة الرتب المستثناة من المصيدة (للمالك فقط).",
+            description="الرتب اللي المصيدة ما تلمسها (للمالك فقط).",
             default_permissions=discord.Permissions(administrator=True),
         )
         self.cog = cog
 
-    @app_commands.command(name="add", description="استثنِ رتبة من المصيدة.")
-    @app_commands.describe(role="الرتبة اللي تبي تستثنيها")
+    @app_commands.command(name="add", description="خلّ المصيدة ما تلمس أصحاب رتبة معيّنة.")
+    @app_commands.describe(role="الرتبة اللي تبي المصيدة تطنّشها")
     @utilities.owner_only()
     async def add(self, interaction: discord.Interaction, role: discord.Role) -> None:
         await self.cog.db.add_safe_role(role.id)
@@ -319,7 +394,7 @@ class HoneypotSafeRoles(app_commands.Group):
         )
         log.info("Honeypot safe role added: %s", role.id)
 
-    @app_commands.command(name="remove", description="شِل رتبة من قائمة الاستثناء.")
+    @app_commands.command(name="remove", description="شِل رتبة من الاستثناء وخلّ المصيدة تمسكها.")
     @app_commands.describe(role="الرتبة اللي تبي تشيلها من الاستثناء")
     @utilities.owner_only()
     async def remove(
@@ -337,7 +412,7 @@ class HoneypotSafeRoles(app_commands.Group):
                 f"❌ رتبة {role.mention} أصلاً مو في قائمة الاستثناء.", ephemeral=True
             )
 
-    @app_commands.command(name="list", description="اعرض الرتب المستثناة.")
+    @app_commands.command(name="list", description="شوف الرتب اللي المصيدة ما تلمسها.")
     @utilities.owner_only()
     async def list(self, interaction: discord.Interaction) -> None:
         role_ids = await self.cog.db.list_safe_roles()
@@ -358,29 +433,43 @@ class HoneypotAction(app_commands.Group):
     def __init__(self, cog: Honeypot) -> None:
         super().__init__(
             name="honeypot-action",
-            description="إدارة إجراء المصيدة (للمالك فقط).",
+            description="وش تسوي المصيدة بللي يرسل فيها (للمالك فقط).",
             default_permissions=discord.Permissions(administrator=True),
         )
         self.cog = cog
 
-    @app_commands.command(name="set", description="غيّر إجراء المصيدة.")
-    @app_commands.describe(action="الإجراء الجديد")
+    @app_commands.command(name="set", description="غيّر وش يصير للي يرسل في المصيدة.")
+    @app_commands.describe(
+        action="العقوبة الجديدة",
+        duration="مدة الكتم إذا اخترت Timeout — مثل 30m أو 2h أو 7d",
+    )
     @app_commands.choices(action=ACTION_CHOICES)
     @utilities.owner_only()
     async def set(
-        self, interaction: discord.Interaction, action: app_commands.Choice[str]
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        duration: str | None = None,
     ) -> None:
-        if await self.cog.db.get_honeypot_config() is None:
+        timeout_seconds: int | None = None
+        if duration is not None:
+            timeout_seconds = await _parse_timeout_arg(interaction, duration)
+            if timeout_seconds is None:
+                return
+        row = await self.cog.db.get_honeypot_config()
+        if row is None:
             await interaction.response.send_message(
                 "❌ المصيدة مو مجهزة. استخدم `/honeypot-setup` أول.", ephemeral=True
             )
             return
-        await self.cog.db.set_honeypot_action(action.value)
+        await self.cog.db.set_honeypot_action(action.value, timeout_seconds)
         await self.cog._refresh_cache()
         # Keep the tracking embed's action field truthful.
         await self.cog._refresh_embed_from_db()
+        effective_timeout = timeout_seconds or row["timeout_seconds"]
         await interaction.response.send_message(
-            f"✅ الإجراء صار: **{ACTION_LABELS[action.value]}**.", ephemeral=True
+            f"✅ الإجراء صار: **{_action_label(action.value, effective_timeout)}**.",
+            ephemeral=True,
         )
         log.info("Honeypot action set to %s", action.value)
 
