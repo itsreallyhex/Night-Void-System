@@ -246,6 +246,32 @@ async def s_hostile_and_volume(db: Database, r: Report) -> None:
             f"holders={circ['holders']}")
 
 
+async def s_verify(db: Database, r: Report) -> None:
+    # Single-row config, both roles round-trip, re-setup re-arms.
+    r.check("verify: no config before setup", await db.get_verify_config() is None)
+    await db.upsert_verify_config(role_id=11, unverify_role_id=22, channel_id=33, embed_message_id=44)
+    row = await db.get_verify_config()
+    r.check("verify: setup stores both roles + channel",
+            (row["role_id"], row["unverify_role_id"], row["channel_id"]) == (11, 22, 33),
+            dict(row))
+    r.check("verify: setup arms the gate", row["enabled"] == 1)
+
+    await db.set_verify_enabled(False)
+    r.check("verify: disable clears the flag", (await db.get_verify_config())["enabled"] == 0)
+    await db.set_verify_embed_message_id(999)
+    r.check("verify: panel message id repointed",
+            (await db.get_verify_config())["embed_message_id"] == 999)
+
+    # Re-setup rearms (enabled back to 1) and repoints without duplicating rows.
+    await db.upsert_verify_config(role_id=1, unverify_role_id=2, channel_id=3, embed_message_id=4)
+    row = await db.get_verify_config()
+    r.check("verify: re-setup re-arms the gate", row["enabled"] == 1)
+    r.check("verify: re-setup repoints roles", (row["role_id"], row["unverify_role_id"]) == (1, 2))
+    async with db.conn.execute("SELECT COUNT(*) AS c FROM verify_config") as cur:
+        n = (await cur.fetchone())["c"]
+    r.check("verify: stays a single row (CHECK id = 1)", n == 1, f"rows={n}")
+
+
 async def s_backup(db: Database, r: Report, tmp: Path) -> None:
     dest = tmp / "snapshot.db"
     await db.backup_to(str(dest))
@@ -271,6 +297,7 @@ async def main() -> int:
         await s_reviews(db, r)
         await s_shop(db, r)
         await s_leavers(db, r)
+        await s_verify(db, r)
         await s_hostile_and_volume(db, r)
         await s_backup(db, r, tmp)
     finally:

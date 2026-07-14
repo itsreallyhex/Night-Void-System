@@ -100,7 +100,7 @@ WEB_STORE_URL: str | None = _str("WEB_STORE_URL", "https://night-void-store.web.
 # System 1 — Tickets --------------------------------------------------------- #
 TICKET_USE_THREADS: bool = _bool("TICKET_USE_THREADS", False)
 TICKET_PANEL_CHANNEL_ID: int | None = _int("TICKET_PANEL_CHANNEL_ID")
-TICKET_CATEGORY_ID: int | None = _int("TICKET_CATEGORY_ID", 1506743374290616491)
+TICKET_CATEGORY_ID: int | None = _int("TICKET_CATEGORY_ID", 1526680229505011832)
 TICKET_STAFF_ROLE_ID: int = _int("TICKET_STAFF_ROLE_ID", 1514779833253630083)
 TICKET_LOG_CHANNEL_ID: int | None = _int("TICKET_LOG_CHANNEL_ID", 1506774357207285790)
 # Auto-close: a ticket with no message for AUTOCLOSE_HOURS gets a warning ping;

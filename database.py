@@ -154,6 +154,22 @@ CREATE TABLE IF NOT EXISTS honeypot_safe_roles (
     role_id  INTEGER PRIMARY KEY
 );
 
+-- Verification gate. Single-guild, so one config row and no guild_id.
+--   role_id           -> the "verified" role granted once a member passes.
+--   unverify_role_id  -> the "hold" role assigned on join; a deny-View overwrite
+--                        for it is applied to every channel except the gate, so
+--                        held members see only the gate channel until they pass.
+-- Verifying removes the hold role (revealing the server) and grants role_id.
+-- Privacy by design: no per-member record is kept here.
+CREATE TABLE IF NOT EXISTS verify_config (
+    id                INTEGER PRIMARY KEY CHECK (id = 1),
+    role_id           INTEGER NOT NULL,
+    unverify_role_id  INTEGER NOT NULL DEFAULT 0,
+    channel_id        INTEGER NOT NULL,
+    embed_message_id  INTEGER,
+    enabled           INTEGER NOT NULL DEFAULT 1
+);
+
 -- Human-readable views for DB Browser / sqlite3: same data as the base
 -- tables but with usernames instead of raw ids. Dropped and recreated on
 -- every startup so definition changes ship automatically.
@@ -335,6 +351,17 @@ class Database:
             await self.conn.execute(
                 "ALTER TABLE honeypot_config ADD COLUMN "
                 "timeout_seconds INTEGER NOT NULL DEFAULT 86400"
+            )
+
+        # verify_config gained a hold role (unverify_role_id) after its first
+        # single-role shape shipped. Additive, so a plain ADD COLUMN suffices;
+        # 0 marks "not configured", which setup overwrites on the next run.
+        async with self.conn.execute("PRAGMA table_info(verify_config)") as cur:
+            vf_cols = {row["name"] for row in await cur.fetchall()}
+        if vf_cols and "unverify_role_id" not in vf_cols:
+            await self.conn.execute(
+                "ALTER TABLE verify_config ADD COLUMN "
+                "unverify_role_id INTEGER NOT NULL DEFAULT 0"
             )
 
     async def close(self) -> None:
@@ -1074,6 +1101,57 @@ class Database:
             "SELECT role_id FROM honeypot_safe_roles ORDER BY role_id ASC"
         ) as cur:
             return [row["role_id"] for row in await cur.fetchall()]
+
+    # ----------------------------------------------------------------- #
+    # Verification gate (single config row)
+    # ----------------------------------------------------------------- #
+    async def get_verify_config(self) -> aiosqlite.Row | None:
+        """The single verify-gate config row, or None before first setup."""
+        async with self.conn.execute(
+            "SELECT * FROM verify_config WHERE id = 1"
+        ) as cur:
+            return await cur.fetchone()
+
+    async def upsert_verify_config(
+        self,
+        role_id: int,
+        unverify_role_id: int,
+        channel_id: int,
+        embed_message_id: int,
+    ) -> None:
+        """Create or repoint the single verify config row (id hard-pinned to 1).
+        A re-setup re-arms the gate (enabled = 1)."""
+        await self.conn.execute(
+            """
+            INSERT INTO verify_config
+                (id, role_id, unverify_role_id, channel_id, embed_message_id)
+            VALUES (1, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                role_id = excluded.role_id,
+                unverify_role_id = excluded.unverify_role_id,
+                channel_id = excluded.channel_id,
+                embed_message_id = excluded.embed_message_id,
+                enabled = 1
+            """,
+            (role_id, unverify_role_id, channel_id, embed_message_id),
+        )
+        await self.conn.commit()
+
+    async def set_verify_embed_message_id(self, message_id: int) -> None:
+        """Repoint the stored panel message id."""
+        await self.conn.execute(
+            "UPDATE verify_config SET embed_message_id = ? WHERE id = 1",
+            (message_id,),
+        )
+        await self.conn.commit()
+
+    async def set_verify_enabled(self, enabled: bool) -> None:
+        """Open or close the gate without touching the rest of the config."""
+        await self.conn.execute(
+            "UPDATE verify_config SET enabled = ? WHERE id = 1",
+            (1 if enabled else 0,),
+        )
+        await self.conn.commit()
 
     # ----------------------------------------------------------------- #
     # Economy (for the /economy admin dashboard)

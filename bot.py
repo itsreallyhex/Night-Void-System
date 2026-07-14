@@ -33,6 +33,7 @@ COGS = (
     "cogs.services",
     "cogs.owner",
     "cogs.honeypot",
+    "cogs.verify",
 )
 
 
