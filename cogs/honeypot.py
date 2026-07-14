@@ -113,11 +113,26 @@ class Honeypot(commands.Cog):
     ) -> discord.Embed:
         # Deliberately no timestamp and no per-incident detail: the counter is
         # the entire record this feature keeps.
+        #
+        # State-driven semantic color: an armed trap is a danger surface,
+        # a disarmed one drops to low-attention neutral. The الحالة field
+        # spells the state out in text too, so color is never the only signal.
         embed = discord.Embed(
-            title="🍯 قناة المصيدة",
-            description="أي رسالة تُرسل هنا تعتبر تفعيل تلقائي للنظام.",
-            color=branding.NEUTRAL,
+            title="⚠️ لا ترسل أي رسالة هنا",
+            description=(
+                "هذي القناة مصيدة أمنية لاكتشاف الحسابات المخترقة.\n"
+                "الحسابات المخترقة غالباً ترسل روابط سبام (مسابقات وهمية، "
+                "مستر بيست، مواقع قمار) بكل قناة تقدر توصلها تلقائياً.\n\n"
+                "**أي رسالة تُرسل هنا = عقوبة تلقائية فورية.**\n\n"
+                "لو انكتمت أو انطردت من هالقناة، الأغلب حسابك مخترق.\n"
+                "غيّر كلمة المرور وفعّل التحقق بخطوتين (2FA) فوراً.\n\n"
+                "لو ما سويت شي، هذا التنبيه ما يخصك."
+            ),
+            color=branding.DANGER if enabled else branding.NEUTRAL,
         )
+        # Hierarchy: the counter is the hero metric (the feature's only
+        # record) — full-width on top; config details follow as one row.
+        embed.add_field(name="🎯 عدد التفعيلات", value=f"**{count:,}**", inline=False)
         embed.add_field(name="القناة", value=f"<#{channel_id}>", inline=True)
         embed.add_field(
             name="الإجراء",
@@ -127,9 +142,25 @@ class Honeypot(commands.Cog):
         embed.add_field(
             name="الحالة", value="🟢 مفعّل" if enabled else "🔴 معطّل", inline=True
         )
-        embed.add_field(name="عدد التفعيلات", value=f"{count:,}", inline=False)
+        # Brand consistency with the other panels: logo thumbnail whenever the
+        # asset exists on disk. attachment:// resolves on sends that attach the
+        # file, and on edits of a message that already carries it.
+        if branding.logo_file() is not None:
+            embed.set_thumbnail(url=branding.LOGO_ATTACHMENT)
         embed.set_footer(text=f"{branding.FOOTER} • المصيدة")
         return embed
+
+    @staticmethod
+    async def _send_tracking_embed(
+        channel: discord.abc.Messageable, embed: discord.Embed
+    ) -> discord.Message:
+        """Send the tracking embed with the store logo attached (the same
+        attachment dance utilities.post_panel does for the other panels)."""
+        kwargs: dict = {"embed": embed}
+        logo = branding.logo_file()
+        if logo is not None:
+            kwargs["file"] = logo
+        return await channel.send(**kwargs)
 
     async def _update_embed(self, row, count: int) -> None:
         """Edit the tracking embed in place; self-heal if it's gone.
@@ -163,7 +194,7 @@ class Honeypot(commands.Cog):
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 pass  # fall through to the self-heal repost below
         try:
-            message = await channel.send(embed=embed)
+            message = await self._send_tracking_embed(channel, embed)
             await self.db.set_honeypot_embed_message_id(message.id)
         except (discord.Forbidden, discord.HTTPException):
             log.error(
@@ -297,7 +328,7 @@ class Honeypot(commands.Cog):
             channel.id, action.value, True, count, effective_timeout
         )
         try:
-            message = await channel.send(embed=embed)
+            message = await self._send_tracking_embed(channel, embed)
         except (discord.Forbidden, discord.HTTPException):
             await interaction.response.send_message(
                 f"❌ ما قدرت أرسل في {channel.mention}. تأكد إن عندي صلاحية "
