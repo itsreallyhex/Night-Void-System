@@ -2,9 +2,10 @@
 
 A single-guild Discord bot for the [Night Void Server](https://discord.gg/788VYYWNDF) community. It handles
 support tickets, a credit economy (earned by chatting or sitting in voice),
-redeemable codes, a role shop, paid minor services, reviews, and
-announcements. User-facing text is Saudi Arabic; the code and docs are
-English.
+redeemable codes, a role shop, paid minor services, reviews,
+announcements, a join-verification gate, and a honeypot channel for
+compromised-account detection. User-facing text is Saudi Arabic; the code and
+docs are English.
 
 Built on [discord.py](https://discordpy.readthedocs.io/) 2.4+ with async
 SQLite (`aiosqlite`) — one cog per system, nothing fancier than that.
@@ -15,13 +16,15 @@ SQLite (`aiosqlite`) — one cog per system, nothing fancier than that.
 
 | # | System | What it does |
 |---|--------|--------------|
-| 1 | **Tickets** | One open ticket per user (enforced by a DB unique index). Private channel or thread; closing it triggers a review. |
+| 1 | **Tickets** | One open ticket per user (enforced by a DB unique index). Private channel or thread; closing it triggers a review. Staff get an in-ticket admin menu (copy transcript, remind opener, close with a stated reason). |
 | 2 | **Codes** | Redeemable `NIGHTVOID-…` codes that grant a **role, credits, or both**. Redeem via a persistent panel + modal. Atomic against double-spend. |
 | 3 | **Reviews** | On ticket close, DMs the customer a 1–5★ rating + modal; accepted reviews post to a reviews channel. Admin toggle, state persisted. |
 | 4 | **Announcements** | Admin `/announce` posts a rich embed with optional image and `@here`/`@everyone` ping. |
 | 5 | **Credits** | Earn credits by messaging (weighted-random award) and by being in voice with others. Leaderboard + admin economy dashboard. |
 | 6 | **Role shop** | Spend credits to buy roles. The catalogue lives in the DB and the owner edits it live with `/shop-add`/`/shop-remove` — no redeploy needed. Atomic deduction with automatic refund on failure. |
 | 7 | **Minor services** | Spend a fixed amount of credits to file a service request to staff via a modal. |
+| 8 | **Verify gate** | New members are held behind a hold role that hides every channel except the gate; a persistent button reveals the server and grants the verified role. New channels are auto-hidden from held members as the server grows. |
+| 9 | **Honeypot channel** | One designated bait channel with zero legitimate traffic. Any message posted there triggers an automatic penalty (kick, ban, remove roles, timeout, or alert-only) — the classic sign of a compromised account or spam bot. Keeps only a bare trigger counter, by design: no per-incident log of who or when. |
 | — | **Owner tools** | Private prefix commands (`!`) to grant/set/inspect credits, dump a full DB overview, back up the database, and restart the bot. |
 | — | **Leave cleanup** | When a member leaves: their open ticket closes immediately and their balance burns after a **24 h grace period** (rejoining in time keeps everything). |
 | — | **Extras (drop-ins)** | Any `.py` file dropped into `cogs/extras/` auto-loads at startup — no registration needed. |
@@ -56,12 +59,38 @@ SQLite (`aiosqlite`) — one cog per system, nothing fancier than that.
 | `/shop-remove <item>` | Owner | Remove a role from the shop |
 | `/shop-list` | Owner | List the shop catalogue with prices |
 | `/request-service` | Anyone | Spend credits to request a minor service |
+| `/verify-setup <verify_role> <unverify_role>` | Admin | Post the verify panel in the current channel, hide every other channel from the hold role, and store the config |
+| `/verify-status` | Admin | Show the configured roles/channel, on/off state, and verified member count |
+| `/verify-enable` | Admin | Turn the verify gate back on |
+| `/verify-disable` | Admin | Turn the verify gate off (new joiners are no longer held) |
+| `/honeypot-setup <channel> <action> [duration]` | Owner | Designate the bait channel and the penalty (kick / ban / remove roles / timeout / alert-only); `duration` only applies to timeout |
+| `/honeypot-status` | Owner | Show the configured channel, action, on/off state, trigger count, and exempt roles |
+| `/honeypot-enable` | Owner | Turn the honeypot back on |
+| `/honeypot-disable` | Owner | Turn the honeypot off |
+| `/honeypot-action set <action> [duration]` | Owner | Change the configured penalty without a full re-setup |
+| `/honeypot-safe-roles add <role>` | Owner | Exempt a role from the honeypot (messages are still deleted, no penalty applied) |
+| `/honeypot-safe-roles remove <role>` | Owner | Remove a role from the exemption list |
+| `/honeypot-safe-roles list` | Owner | List currently exempt roles |
 
 > **Owner-gated slash commands:** the code commands (`/add-code`,
-> `/generate-codes`, `/list-codes`, `/delete-codes`, `/code-stats`) and the shop
-> management commands (`/shop-add`, `/shop-remove`, `/shop-list`) show up for
-> admins because of Discord's default permissions, but the code actually
-> checks for the **application owner** specifically.
+> `/generate-codes`, `/list-codes`, `/delete-codes`, `/code-stats`), the shop
+> management commands (`/shop-add`, `/shop-remove`, `/shop-list`), and every
+> honeypot command show up for admins because of Discord's default
+> permissions, but the code actually checks for the **application owner**
+> specifically. The verify-gate commands are the exception — those check for
+> **admin**, not owner, so any admin can run them.
+
+### Ticket admin menu (in-channel, staff-only)
+
+Every ticket channel carries a persistent **🛠️ أدوات الإدارة** button
+alongside the close button. Staff who press it get an ephemeral dropdown with
+three actions:
+
+| Action | What it does |
+|--------|--------------|
+| **طلب نسخة من التذكرة (copy)** | Flattens the channel history (up to 1,000 messages) into a plain-text transcript and DMs it to the requesting admin as a file. Falls back to posting it ephemerally in-channel if their DMs are closed. |
+| **تذكير العضو (remind)** | Pings the ticket opener in-channel and best-effort DMs them a nudge that staff is waiting on a reply. |
+| **إغلاق بسبب (close with reason)** | Opens a modal for a reason, then closes the ticket the same way `/close` does — DB row, review request, log entry — except the closure log and the opener's DM both include the stated reason. |
 
 ### Owner prefix commands (`!`)
 
@@ -114,6 +143,53 @@ Redeemable codes and the owner commands can also grant credits directly.
 
 ---
 
+## How the verify gate works
+
+([cogs/verify.py](cogs/verify.py))
+
+- `/verify-setup` picks two roles — a **hold role** and a **verified role** —
+  and posts a one-button panel in the current channel. The bot then applies a
+  deny-`View Channel` overwrite for the hold role to every channel in the
+  server except the gate itself.
+- New members get the hold role on join, so they see only the gate channel
+  until they act.
+- Pressing the panel's **تحقّق** button removes the hold role (which is what
+  actually reveals the server — a role deny beats the `@everyone` allow) and
+  grants the verified role.
+- Any channel created after setup is auto-hidden from the hold role too, so
+  the lockdown doesn't drift as the server grows.
+- **Privacy by design:** no per-member verification record is kept — only the
+  current config (roles, channel, panel message, on/off state).
+- `/verify-setup` validates before touching anything: the two roles must
+  differ, neither can be `@everyone`, and the bot's own top role must sit
+  above both — otherwise it refuses outright rather than leaving the server
+  half-configured.
+
+---
+
+## How the honeypot works
+
+([cogs/honeypot.py](cogs/honeypot.py))
+
+- `/honeypot-setup` designates one channel as bait and picks a penalty: kick,
+  ban, remove roles, timeout (with a configurable duration up to Discord's
+  28-day cap), or alert-only.
+- Legitimate members have no reason to post in the bait channel, so any
+  message there — typically from a compromised account or a spam bot —
+  triggers the configured penalty automatically.
+- A tracking embed in the channel shows the live trigger count and the
+  currently configured action; it's edited in place (and self-heals if
+  deleted) rather than reposted.
+- `/honeypot-safe-roles` exempts specific roles from the penalty — their
+  messages are still deleted, but no action is taken against the member.
+- **By design, this feature keeps no per-incident record** — no log of who
+  triggered it or when, only the bare running counter. That's a deliberate
+  privacy trade-off, not an oversight: know that if you ever need to
+  investigate *which* account tripped the trap and when, this system won't
+  have that history for you.
+
+---
+
 ## Architecture
 
 ```
@@ -125,13 +201,15 @@ amounts.py        "1k"/"2.5m" amount parsing (converter + parser)
 branding.py       Shared logo attachment + web-store link button
 shop_config.json  Role-shop SEED only (first boot); live catalogue lives in DB
 cogs/
-  tickets.py        System 1
+  tickets.py        System 1 (+ in-ticket admin menu: transcript / remind / close-reason)
   codes.py          System 2
   reviews.py        System 3
   announcements.py  System 4
   credits.py        System 5 (+ /leaderboard, /economy)
   shop.py           System 6
   services.py       System 7
+  verify.py         System 8 — join-verification gate
+  honeypot.py        System 9 — bait channel + auto-penalty
   owner.py          Owner prefix commands
   extras/           Drop-in folder — every .py here auto-loads (see _template.py)
     dmall.py          !dmall — team-gated mass DM with burst/cooldown + stop
@@ -141,6 +219,8 @@ cogs/
     leavers.py        Background: ticket close on leave + 24 h balance burn
 tools/
   seed_codes.py     CLI to bulk-insert codes into the DB
+  stress_test.py    Scripted checks against the DB layer (economy, shop,
+                    leavers, verify gate, backups, and more)
 Assets/NVS-logo.orig.png
 ```
 
@@ -150,8 +230,13 @@ Assets/NVS-logo.orig.png
 balance), `tickets`, `reviews`, `purchases`, `transfers` (the `/pay` log),
 `users` (user_id → username, kept fresh by the usernames drop-in), `leavers`
 (pending 24 h balance burns — survives restarts), `shop_items` (the live
-role-shop catalogue, seeded once from `shop_config.json`), and a `settings`
-key/value table. A few of these decisions matter more than they look:
+role-shop catalogue, seeded once from `shop_config.json`), `verify_config`
+(single-row: verify/hold role IDs, gate channel, panel message ID, on/off
+state), `honeypot_config` (single-row: bait channel, action type, timeout
+duration, panel message ID, trigger count, on/off state),
+`honeypot_safe_roles` (roles exempt from the honeypot penalty), and a
+`settings` key/value table. A few of these decisions matter more than they
+look:
 
 - **Atomic mutations.** Credit spends run a conditional
   `UPDATE … WHERE balance >= ?`, so a balance can't go negative even under a
@@ -161,8 +246,9 @@ key/value table. A few of these decisions matter more than they look:
   kills containers with a bare SIGTERM and no graceful shutdown. Recent
   writes need to survive that.
 - **Additive migrations.** `Database._migrate()` runs on connect and adds new
-  columns with `ALTER TABLE` (e.g. `codes.credits`), so an existing database
-  just upgrades in place — no manual intervention.
+  columns with `ALTER TABLE` (e.g. `codes.credits`, later
+  `verify_config.unverify_role_id`), so an existing database just upgrades in
+  place — no manual intervention.
 - **Timestamps** are ISO-8601 UTC strings, compared lexicographically for
   time-window aggregates. Works fine as long as the format never changes.
 - **Readable views.** Six `v_*` views (balances, purchases, reviews, tickets,
@@ -181,6 +267,10 @@ key/value table. A few of these decisions matter more than they look:
   matched by `custom_id` pattern, so a role added today gets a working button
   immediately — even on `/shop` messages that were posted before the last
   restart.
+- **Single config rows.** `verify_config` and `honeypot_config` are each
+  pinned to a single row (`CHECK (id = 1)`); re-running setup repoints that
+  row via `ON CONFLICT … DO UPDATE` instead of creating a duplicate, and
+  re-arms the `enabled` flag in the process.
 
 ---
 
@@ -221,6 +311,11 @@ After that, the `shop_items` table is the source of truth. Manage it live with
 `/shop-add` and `/shop-remove`; editing the JSON after launch does nothing to
 a store that's already running.
 
+The verify gate and honeypot both work the same way as the role shop in this
+respect: `/verify-setup` and `/honeypot-setup` write their config to the
+database on first run, and later re-running the setup command repoints that
+same row rather than creating a second configuration.
+
 ---
 
 ## Operational notes
@@ -229,6 +324,11 @@ a store that's already running.
 - Role assignments that fail on a permission error **auto-refund** the credits.
 - The bot logs failures with context and never crashes on a single failed action.
 - No public port is needed — run it as a background worker (`Procfile`: `worker: python bot.py`).
+- Both the verify gate and the honeypot are deliberately record-light: verify
+  keeps no per-member verification history, and the honeypot keeps only a
+  running trigger count, not a log of individual incidents. Neither is a bug —
+  both are stated privacy trade-offs — but it's worth knowing going in if you
+  ever need to audit *who* tripped either system and *when*.
 
 ---
 
