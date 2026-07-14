@@ -93,6 +93,8 @@ OWNER_USER_ID: int = _int("OWNER_USER_ID", 904399821580943420)
 
 # Branding: logo shown on panels + link to the web store ('' hides the button).
 LOGO_PATH: str = _str("LOGO_PATH", "Assets/NVS-logo.orig.png")
+# Separate logo for the honeypot tracking embed only; every other panel keeps LOGO_PATH.
+HONEYPOT_LOGO_PATH: str = _str("HONEYPOT_LOGO_PATH", "Assets/NightVoid.png")
 WEB_STORE_URL: str | None = _str("WEB_STORE_URL", "https://night-void-store.web.app/")
 
 # System 1 — Tickets --------------------------------------------------------- #

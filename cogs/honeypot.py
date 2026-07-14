@@ -11,6 +11,7 @@ one safe-role list, no guild_id anywhere.
 """
 
 import logging
+import os
 from datetime import timedelta
 
 import discord
@@ -18,6 +19,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import branding
+import config
 import utilities
 
 log = logging.getLogger("nightvoid.honeypot")
@@ -39,6 +41,20 @@ ACTION_CHOICES = [
 
 # Discord's hard API cap on communication_disabled_until.
 MAX_TIMEOUT = timedelta(days=28)
+
+# The honeypot embed carries its own logo (HONEYPOT_LOGO_PATH) instead of the
+# store-wide one from branding — same attachment dance, different asset.
+LOGO_FILENAME = "nightvoid.png"
+LOGO_ATTACHMENT = f"attachment://{LOGO_FILENAME}"
+
+
+def _logo_file() -> discord.File | None:
+    """Fresh discord.File of the honeypot logo, or None if it isn't on disk.
+    A new File must be built per send (the handle is consumed on upload)."""
+    path = config.HONEYPOT_LOGO_PATH
+    if path and os.path.exists(path):
+        return discord.File(path, filename=LOGO_FILENAME)
+    return None
 
 
 def _format_duration(seconds: int) -> str:
@@ -140,11 +156,11 @@ class Honeypot(commands.Cog):
         embed.add_field(
             name="الحالة", value="🟢 مفعّل" if enabled else "🔴 معطّل", inline=True
         )
-        # Brand consistency with the other panels: logo thumbnail whenever the
-        # asset exists on disk. attachment:// resolves on sends that attach the
-        # file, and on edits of a message that already carries it.
-        if branding.logo_file() is not None:
-            embed.set_thumbnail(url=branding.LOGO_ATTACHMENT)
+        # Honeypot-specific logo thumbnail whenever the asset exists on disk.
+        # attachment:// resolves on sends that attach the file, and on edits
+        # of a message that already carries it.
+        if _logo_file() is not None:
+            embed.set_thumbnail(url=LOGO_ATTACHMENT)
         embed.set_footer(text=f"{branding.FOOTER} • المصيدة")
         return embed
 
@@ -152,10 +168,10 @@ class Honeypot(commands.Cog):
     async def _send_tracking_embed(
         channel: discord.abc.Messageable, embed: discord.Embed
     ) -> discord.Message:
-        """Send the tracking embed with the store logo attached (the same
+        """Send the tracking embed with the honeypot logo attached (the same
         attachment dance utilities.post_panel does for the other panels)."""
         kwargs: dict = {"embed": embed}
-        logo = branding.logo_file()
+        logo = _logo_file()
         if logo is not None:
             kwargs["file"] = logo
         return await channel.send(**kwargs)
