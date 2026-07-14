@@ -160,6 +160,20 @@ class Owner(commands.Cog):
         )
         log.info("Owner %s reset ticket numbering (%s rows deleted).", ctx.author, deleted)
 
+    @commands.command(name="hpreset", aliases=["HPreset", "honeypotreset"])
+    async def hpreset(self, ctx: commands.Context) -> None:
+        """Zero the honeypot trigger counter (and refresh the tracking embed)."""
+        if not await self.db.reset_honeypot_counter():
+            await self._private(ctx, "⚠️ المصيدة مو مجهزة أصلاً — ما فيه عدّاد أصفّره.")
+            return
+        honeypot = self.bot.get_cog("Honeypot")
+        if honeypot is not None:
+            # Push the zeroed counter onto the tracking embed right away
+            # (self-healing path — reposts the embed if it's gone).
+            await honeypot._refresh_embed_from_db()
+        await self._private(ctx, "✅ تصفّر عدّاد المصيدة.")
+        log.info("Owner reset the honeypot counter.")
+
     # ------------------------------------------------------------------ #
     # Database overview
     # ------------------------------------------------------------------ #
@@ -244,6 +258,7 @@ class Owner(commands.Cog):
         embed.add_field(name="!db", value="نظرة كاملة على قاعدة البيانات", inline=False)
         embed.add_field(name="!dbbp", value="نسخة احتياطية من قاعدة البيانات (توصلك خاص)", inline=False)
         embed.add_field(name="!tickreset", value="تصفير عداد التذاكر (يبدأ من #1)", inline=False)
+        embed.add_field(name="!hpreset", value="تصفير عدّاد المصيدة", inline=False)
         embed.add_field(name="!restart", value="إعادة تشغيل البوت (أو `!rest`)", inline=False)
         # !dmall is disabled for now — its cog is parked at cogs/extras/_dmall.py
         # (the leading underscore keeps the loader from loading it). To bring it

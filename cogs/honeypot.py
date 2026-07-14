@@ -105,7 +105,6 @@ class Honeypot(commands.Cog):
     # ------------------------------------------------------------------ #
     def _build_embed(
         self,
-        channel_id: int,
         action_type: str,
         enabled: bool,
         count: int,
@@ -133,7 +132,6 @@ class Honeypot(commands.Cog):
         # Hierarchy: the counter is the hero metric (the feature's only
         # record) — full-width on top; config details follow as one row.
         embed.add_field(name="🎯 عدد التفعيلات", value=f"**{count:,}**", inline=False)
-        embed.add_field(name="القناة", value=f"<#{channel_id}>", inline=True)
         embed.add_field(
             name="الإجراء",
             value=_action_label(action_type, timeout_seconds),
@@ -178,7 +176,6 @@ class Honeypot(commands.Cog):
             )
             return
         embed = self._build_embed(
-            row["channel_id"],
             row["action_type"],
             bool(row["enabled"]),
             count,
@@ -221,23 +218,24 @@ class Honeypot(commands.Cog):
             return
         member = message.author
 
-        # Safe-role exemption comes BEFORE deletion: exempt members keep their
-        # message and cause no action and no counter bump.
-        if any(r.id in self._safe_role_ids for r in member.roles):
-            return
-
         row = await self.db.get_honeypot_config()
         if row is None:
             # Cache says armed but the config row is gone — resync and bail.
             await self._refresh_cache()
             return
 
-        # Deletion always happens first, and its failure never blocks the
+        # Deletion always happens first — for everyone, safe roles included,
+        # so the trap channel stays clean — and its failure never blocks the
         # configured action.
         try:
             await message.delete()
         except (discord.Forbidden, discord.HTTPException) as exc:
             log.warning("Honeypot: could not delete trigger message: %s", exc)
+
+        # Safe-role members stop here: message removed, but no punishment and
+        # no counter bump.
+        if any(r.id in self._safe_role_ids for r in member.roles):
+            return
 
         await self._apply_action(member, row)
 
@@ -324,9 +322,7 @@ class Honeypot(commands.Cog):
             existing["timeout_seconds"] if existing else 86400
         )
 
-        embed = self._build_embed(
-            channel.id, action.value, True, count, effective_timeout
-        )
+        embed = self._build_embed(action.value, True, count, effective_timeout)
         try:
             message = await self._send_tracking_embed(channel, embed)
         except (discord.Forbidden, discord.HTTPException):
@@ -409,12 +405,12 @@ class HoneypotSafeRoles(app_commands.Group):
     def __init__(self, cog: Honeypot) -> None:
         super().__init__(
             name="honeypot-safe-roles",
-            description="الرتب اللي المصيدة ما تلمسها (للمالك فقط).",
+            description="الرتب اللي المصيدة ما تعاقبها (للمالك فقط).",
             default_permissions=discord.Permissions(administrator=True),
         )
         self.cog = cog
 
-    @app_commands.command(name="add", description="خلّ المصيدة ما تلمس أصحاب رتبة معيّنة.")
+    @app_commands.command(name="add", description="خلّ المصيدة ما تعاقب أصحاب رتبة معيّنة (رسايلهم تنحذف بس).")
     @app_commands.describe(role="الرتبة اللي تبي المصيدة تطنّشها")
     @utilities.owner_only()
     async def add(self, interaction: discord.Interaction, role: discord.Role) -> None:
@@ -443,7 +439,7 @@ class HoneypotSafeRoles(app_commands.Group):
                 f"❌ رتبة {role.mention} أصلاً مو في قائمة الاستثناء.", ephemeral=True
             )
 
-    @app_commands.command(name="list", description="شوف الرتب اللي المصيدة ما تلمسها.")
+    @app_commands.command(name="list", description="شوف الرتب اللي المصيدة ما تعاقبها.")
     @utilities.owner_only()
     async def list(self, interaction: discord.Interaction) -> None:
         role_ids = await self.cog.db.list_safe_roles()

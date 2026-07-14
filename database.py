@@ -1043,6 +1043,15 @@ class Database:
             await self.conn.commit()
         return row["trigger_count"] if row else 0
 
+    async def reset_honeypot_counter(self) -> bool:
+        """Zero the trigger counter (owner maintenance). Returns False if the
+        honeypot was never set up (no config row to reset)."""
+        cur = await self.conn.execute(
+            "UPDATE honeypot_config SET trigger_count = 0 WHERE id = 1"
+        )
+        await self.conn.commit()
+        return cur.rowcount > 0
+
     async def add_safe_role(self, role_id: int) -> None:
         """Exempt a role from the honeypot. Adding twice is a no-op."""
         await self.conn.execute(
