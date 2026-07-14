@@ -133,6 +133,26 @@ CREATE TABLE IF NOT EXISTS shop_items (
     added_at     TEXT    NOT NULL
 );
 
+-- Honeypot channel trap. Single-guild bot, so exactly one config row and no
+-- guild_id anywhere: CHECK (id = 1) makes a second row impossible at the DB
+-- level (every insert must target id 1 and collide with the primary key).
+-- Privacy by design: trigger_count is the ONLY record — no incident rows,
+-- no timestamps, no user ids.
+CREATE TABLE IF NOT EXISTS honeypot_config (
+    id                INTEGER PRIMARY KEY CHECK (id = 1),
+    channel_id        INTEGER NOT NULL,
+    action_type       TEXT    NOT NULL
+        CHECK (action_type IN ('kick', 'ban', 'remove_roles', 'alert_only')),
+    embed_message_id  INTEGER,
+    trigger_count     INTEGER NOT NULL DEFAULT 0,
+    enabled           INTEGER NOT NULL DEFAULT 1
+);
+
+-- Roles fully exempt from the honeypot (no deletion, no action, no counter).
+CREATE TABLE IF NOT EXISTS honeypot_safe_roles (
+    role_id  INTEGER PRIMARY KEY
+);
+
 -- Human-readable views for DB Browser / sqlite3: same data as the base
 -- tables but with usernames instead of raw ids. Dropped and recreated on
 -- every startup so definition changes ship automatically.
@@ -879,6 +899,106 @@ class Database:
         )
         await self.conn.commit()
         return cur.rowcount > 0
+
+    # ----------------------------------------------------------------- #
+    # Honeypot (single config row + safe-role list)
+    # ----------------------------------------------------------------- #
+    async def get_honeypot_config(self) -> aiosqlite.Row | None:
+        """The single honeypot config row, or None before first setup."""
+        async with self.conn.execute(
+            "SELECT * FROM honeypot_config WHERE id = 1"
+        ) as cur:
+            return await cur.fetchone()
+
+    async def upsert_honeypot_config(
+        self, channel_id: int, action_type: str, embed_message_id: int
+    ) -> None:
+        """Create or repoint the single config row (id is hard-pinned to 1).
+
+        A re-setup rearms the trap (enabled = 1) but the lifetime
+        trigger_count survives — it's the feature's only record."""
+        if action_type not in ("kick", "ban", "remove_roles", "alert_only"):
+            raise ValueError(f"invalid honeypot action_type: {action_type!r}")
+        await self.conn.execute(
+            """
+            INSERT INTO honeypot_config (id, channel_id, action_type, embed_message_id)
+            VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                channel_id = excluded.channel_id,
+                action_type = excluded.action_type,
+                embed_message_id = excluded.embed_message_id,
+                enabled = 1
+            """,
+            (channel_id, action_type, embed_message_id),
+        )
+        await self.conn.commit()
+
+    async def set_honeypot_embed_message_id(self, message_id: int) -> None:
+        """Repoint the tracking embed (self-heal after the original was lost)."""
+        await self.conn.execute(
+            "UPDATE honeypot_config SET embed_message_id = ? WHERE id = 1",
+            (message_id,),
+        )
+        await self.conn.commit()
+
+    async def set_honeypot_enabled(self, enabled: bool) -> None:
+        """Arm or disarm the trap without touching the rest of the config."""
+        await self.conn.execute(
+            "UPDATE honeypot_config SET enabled = ? WHERE id = 1",
+            (1 if enabled else 0,),
+        )
+        await self.conn.commit()
+
+    async def set_honeypot_action(self, action_type: str) -> None:
+        """Change the configured action. Raises ValueError on an unknown type
+        (defense-in-depth alongside the CHECK constraint)."""
+        if action_type not in ("kick", "ban", "remove_roles", "alert_only"):
+            raise ValueError(f"invalid honeypot action_type: {action_type!r}")
+        await self.conn.execute(
+            "UPDATE honeypot_config SET action_type = ? WHERE id = 1",
+            (action_type,),
+        )
+        await self.conn.commit()
+
+    async def increment_honeypot_counter(self) -> int:
+        """Atomically bump the trigger counter and return the new total.
+
+        UPDATE + SELECT run under the tx lock so two concurrent triggers can't
+        read the same value. Returns 0 if setup never ran (no row to bump)."""
+        async with self._tx_lock:
+            await self.conn.execute(
+                "UPDATE honeypot_config SET trigger_count = trigger_count + 1 "
+                "WHERE id = 1"
+            )
+            async with self.conn.execute(
+                "SELECT trigger_count FROM honeypot_config WHERE id = 1"
+            ) as cur:
+                row = await cur.fetchone()
+            await self.conn.commit()
+        return row["trigger_count"] if row else 0
+
+    async def add_safe_role(self, role_id: int) -> None:
+        """Exempt a role from the honeypot. Adding twice is a no-op."""
+        await self.conn.execute(
+            "INSERT OR IGNORE INTO honeypot_safe_roles (role_id) VALUES (?)",
+            (role_id,),
+        )
+        await self.conn.commit()
+
+    async def remove_safe_role(self, role_id: int) -> bool:
+        """Un-exempt a role. Returns True if a row was actually removed."""
+        cur = await self.conn.execute(
+            "DELETE FROM honeypot_safe_roles WHERE role_id = ?", (role_id,)
+        )
+        await self.conn.commit()
+        return cur.rowcount > 0
+
+    async def list_safe_roles(self) -> list[int]:
+        """Every exempt role id (stable order for display)."""
+        async with self.conn.execute(
+            "SELECT role_id FROM honeypot_safe_roles ORDER BY role_id ASC"
+        ) as cur:
+            return [row["role_id"] for row in await cur.fetchall()]
 
     # ----------------------------------------------------------------- #
     # Economy (for the /economy admin dashboard)

@@ -32,6 +32,7 @@ COGS = (
     "cogs.shop",
     "cogs.services",
     "cogs.owner",
+    "cogs.honeypot",
 )
 
 
