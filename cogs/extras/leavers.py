@@ -16,7 +16,7 @@ What is deliberately KEPT forever:
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 import discord
 from discord.ext import commands, tasks
@@ -125,7 +125,7 @@ class Leavers(commands.Cog):
             if guild is None:
                 return
             cutoff = (
-                datetime.now(timezone.utc) - timedelta(hours=GRACE_HOURS)
+                utilities.utc_now() - timedelta(hours=GRACE_HOURS)
             ).isoformat()
             due = await self.db.due_leavers(cutoff)
         except Exception:

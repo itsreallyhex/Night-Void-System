@@ -11,7 +11,7 @@ import math
 import random
 import time
 from collections import defaultdict, deque
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 import discord
 from discord import app_commands
@@ -172,7 +172,7 @@ class Credits(commands.Cog):
             description="\n".join(lines),
             color=branding.GOLD,
         )
-        embed.set_footer(text=f"{branding.FOOTER} • لوحة الصدارة")
+        utilities.brand_footer(embed, "لوحة الصدارة")
         await interaction.followup.send(
             embed=embed, allowed_mentions=discord.AllowedMentions.none(), ephemeral=True
         )
@@ -215,7 +215,7 @@ class Credits(commands.Cog):
             return
 
         # Rolling 24h send cap (anti alt-account funnelling).
-        since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        since = (utilities.utc_now() - timedelta(hours=24)).isoformat()
         sent_today = await self.db.transfers_sent_since(sender.id, since)
         if sent_today + value > config.PAY_DAILY_CAP:
             remaining = max(0, config.PAY_DAILY_CAP - sent_today)
@@ -246,12 +246,10 @@ class Credits(commands.Cog):
             ephemeral=True,
         )
         # Tell the recipient (best effort — their DMs may be closed).
-        try:
-            await user.send(
-                f"💸 وصلك تحويل: **{received:,}** كريدت من **{sender.display_name}**."
-            )
-        except discord.HTTPException:
-            pass
+        await utilities.try_dm(
+            user,
+            f"💸 وصلك تحويل: **{received:,}** كريدت من **{sender.display_name}**.",
+        )
         log.info(
             "Transfer: %s -> %s, amount %s (fee %s)", sender, user, value, fee
         )
@@ -266,7 +264,7 @@ class Credits(commands.Cog):
     @utilities.admin_only("❌ هذا الأمر للإدارة فقط.")
     async def economy(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
-        now = datetime.now(timezone.utc)
+        now = utilities.utc_now()
         windows = (
             ("آخر ٧ أيام", now - timedelta(days=7)),
             ("آخر شهر", now - timedelta(days=30)),

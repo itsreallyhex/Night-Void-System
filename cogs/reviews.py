@@ -8,7 +8,6 @@ posted to the reviews channel. Admins can toggle the whole system on/off with
 """
 
 import logging
-from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
@@ -210,7 +209,7 @@ class Reviews(commands.Cog):
             ),
             color=branding.GOLD,
         )
-        embed.set_footer(text=f"{branding.FOOTER} • تقييم الدعم")
+        utilities.brand_footer(embed, "تقييم الدعم")
         try:
             await member.send(embed=embed, view=review_view(ticket_id))
             log.info("Review DM sent to %s (ticket #%s)", member, ticket_id)
@@ -271,7 +270,7 @@ class Reviews(commands.Cog):
 
         embed = discord.Embed(
             color=branding.GOLD,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=utilities.utc_now(),
         )
         embed.set_author(name=str(member), icon_url=member.display_avatar.url)
         embed.add_field(name="التقييم", value=f"{STAR_FULL * stars} ({stars}/5)", inline=False)
@@ -279,7 +278,7 @@ class Reviews(commands.Cog):
         embed.add_field(name="كيف كان تعامل الإدارة؟", value=staff, inline=False)
         if comment:
             embed.add_field(name="ملاحظات", value=comment, inline=False)
-        embed.set_footer(text=f"{branding.FOOTER} • تقييم الدعم")
+        utilities.brand_footer(embed, "تقييم الدعم")
 
         try:
             await channel.send(embed=embed)

@@ -8,7 +8,7 @@ triggers the review system (System 3). User-facing text is Saudi Arabic.
 
 import io
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import discord
 from discord import app_commands
@@ -282,7 +282,7 @@ class Tickets(commands.Cog):
         guild = self.bot.get_guild(config.GUILD_ID)
         if guild is None:
             return
-        now = datetime.now(timezone.utc)
+        now = utilities.utc_now()
         warn_after = timedelta(hours=config.TICKET_AUTOCLOSE_HOURS)
         grace = timedelta(hours=config.TICKET_AUTOCLOSE_GRACE_HOURS)
 
@@ -354,13 +354,11 @@ class Tickets(commands.Cog):
 
         member = guild.get_member(ticket["user_id"])
         if member is not None:
-            try:
-                await member.send(
-                    f"🔒 تذكرتك رقم **#{ticket['id']}** انسكرت تلقائياً بسبب عدم النشاط. "
-                    "تقدر تفتح تذكرة جديدة بأي وقت."
-                )
-            except discord.HTTPException:
-                pass
+            await utilities.try_dm(
+                member,
+                f"🔒 تذكرتك رقم **#{ticket['id']}** انسكرت تلقائياً بسبب عدم النشاط. "
+                "تقدر تفتح تذكرة جديدة بأي وقت.",
+            )
 
         try:
             if isinstance(channel, discord.Thread):
@@ -468,7 +466,7 @@ class Tickets(commands.Cog):
             title=f"{spec['emoji']} {spec['title']}",
             description=spec["welcome"].format(user=user.mention),
             color=spec["color"],
-            timestamp=datetime.now(timezone.utc),
+            timestamp=utilities.utc_now(),
         )
         embed.set_footer(text=f"تذكرة #{ticket_id} • {spec['label']}")
         staff_mention = f"<@&{config.TICKET_STAFF_ROLE_ID}>"
@@ -558,13 +556,11 @@ class Tickets(commands.Cog):
         if reason:
             member = interaction.guild.get_member(ticket["user_id"])
             if member is not None:
-                try:
-                    await member.send(
-                        f"🔒 تذكرتك رقم **#{ticket['id']}** انسكرت.\n"
-                        f"**السبب:** {reason}"
-                    )
-                except discord.HTTPException:
-                    pass
+                await utilities.try_dm(
+                    member,
+                    f"🔒 تذكرتك رقم **#{ticket['id']}** انسكرت.\n"
+                    f"**السبب:** {reason}",
+                )
 
         channel = interaction.channel
         try:
@@ -649,17 +645,12 @@ class Tickets(commands.Cog):
         except discord.HTTPException:
             log.warning("Could not post reminder ping in ticket %s", ticket["id"])
 
-        dm_ok = False
         member = interaction.guild.get_member(opener_id)
-        if member is not None:
-            try:
-                await member.send(
-                    f"⏰ تذكير من **{interaction.guild.name}**: عندك تذكرة مفتوحة "
-                    f"(**#{ticket['id']}**) والإدارة تنتظر ردّك."
-                )
-                dm_ok = True
-            except discord.HTTPException:
-                pass
+        dm_ok = member is not None and await utilities.try_dm(
+            member,
+            f"⏰ تذكير من **{interaction.guild.name}**: عندك تذكرة مفتوحة "
+            f"(**#{ticket['id']}**) والإدارة تنتظر ردّك.",
+        )
         await interaction.followup.send(
             "✅ تم تذكير العضو في التذكرة" + (" وبالخاص." if dm_ok else " (الخاص مقفّل)."),
             ephemeral=True,
@@ -678,7 +669,7 @@ class Tickets(commands.Cog):
         embed = discord.Embed(
             title="تم تسكير التذكرة",
             color=branding.NEUTRAL,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=utilities.utc_now(),
         )
         spec = TICKET_TYPES.get(ticket["type"], TICKET_TYPES["store"])
         embed.add_field(name="التذكرة", value=f"#{ticket['id']}", inline=True)
@@ -714,7 +705,7 @@ class Tickets(commands.Cog):
             ),
             color=branding.BRAND,
         )
-        embed.set_footer(text=f"{branding.FOOTER} • الدعم")
+        utilities.brand_footer(embed, "الدعم")
         if await utilities.post_panel(interaction, embed, TicketPanelView(self)):
             await interaction.response.send_message("✅ تم نشر اللوحة.", ephemeral=True)
 

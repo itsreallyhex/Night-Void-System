@@ -196,7 +196,7 @@ class Shop(commands.Cog):
             description="اصرف كريدتك على الرتب تحت.",
             color=branding.BRAND,
         )
-        embed.set_footer(text=f"{branding.FOOTER} • متجر الرتب")
+        utilities.brand_footer(embed, "متجر الرتب")
         for item in items[:25]:
             embed.add_field(
                 name=f"{item['name']} — {item['cost']:,} كريدت",

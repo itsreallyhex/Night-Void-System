@@ -171,7 +171,7 @@ class Codes(commands.Cog):
     @tasks.loop(hours=6)
     async def _prune_redeemed(self) -> None:
         cutoff = (
-            datetime.now(timezone.utc)
+            utilities.utc_now()
             - timedelta(days=config.CODE_REDEEMED_RETENTION_DAYS)
         ).isoformat()
         deleted = await self.db.delete_old_redeemed_codes(cutoff)
@@ -230,7 +230,7 @@ class Codes(commands.Cog):
             ),
             color=branding.BRAND,
         )
-        embed.set_footer(text=f"{branding.FOOTER} • الأكواد")
+        utilities.brand_footer(embed, "الأكواد")
         if await utilities.post_panel(interaction, embed, RedeemPanelView(self)):
             await interaction.response.send_message("✅ تم نشر لوحة الاستبدال.", ephemeral=True)
 
@@ -495,7 +495,7 @@ class Codes(commands.Cog):
             raise ValueError(
                 "❌ مدة الانتهاء غير صالحة. اكتب مثل `30m` أو `2h` أو `7d`."
             )
-        return (datetime.now(timezone.utc) + delta).isoformat()
+        return (utilities.utc_now() + delta).isoformat()
 
     @staticmethod
     def _code_terms(max_uses: int, expires_at: str | None) -> str:

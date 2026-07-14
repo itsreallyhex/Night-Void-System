@@ -5,7 +5,6 @@ optional image and an optional @here/@everyone ping.
 """
 
 import logging
-from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
@@ -66,9 +65,9 @@ class Announcements(commands.Cog):
             title=title,
             description=body,
             color=branding.BRAND,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=utilities.utc_now(),
         )
-        embed.set_footer(text=f"{branding.FOOTER} • {interaction.user.display_name}")
+        utilities.brand_footer(embed, interaction.user.display_name)
         if image:
             embed.set_image(url=image)
 

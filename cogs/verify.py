@@ -85,7 +85,7 @@ class Verify(commands.Cog):
             ),
             color=branding.BRAND,
         )
-        embed.set_footer(text=f"{branding.FOOTER} • التحقق")
+        utilities.brand_footer(embed, "التحقق")
         return embed
 
     # ------------------------------------------------------------------ #

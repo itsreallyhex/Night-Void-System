@@ -22,13 +22,19 @@ log = logging.getLogger("nightvoid.utilities")
 # --------------------------------------------------------------------------- #
 # Time
 # --------------------------------------------------------------------------- #
+def utc_now() -> datetime:
+    """Timezone-aware current UTC time — the datetime form used for embed
+    timestamps. Its ISO string form is utc_now_iso()."""
+    return datetime.now(timezone.utc)
+
+
 def utc_now_iso() -> str:
     """Current UTC time in the fixed ISO-8601 format every DB row uses.
 
     All created_at/redeemed_at/closed_at columns are written through this so
     string comparison on timestamps stays valid everywhere.
     """
-    return datetime.now(timezone.utc).isoformat()
+    return utc_now().isoformat()
 
 
 _DURATION_UNITS = {"m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
@@ -110,6 +116,43 @@ def staff_only(message: str = "❌ ما عندك صلاحية تستخدم هذ�
         return False
 
     return app_commands.check(predicate)
+
+
+# --------------------------------------------------------------------------- #
+# Embeds
+# --------------------------------------------------------------------------- #
+def brand_footer(embed: discord.Embed, section: str) -> discord.Embed:
+    """Stamp the standard "<FOOTER> • <section>" footer onto an embed.
+
+    Every panel/embed in the bot uses this exact footer shape; this keeps the
+    brand string in one place. Returns the embed so it can be chained.
+    """
+    embed.set_footer(text=f"{branding.FOOTER} • {section}")
+    return embed
+
+
+# --------------------------------------------------------------------------- #
+# Direct messages
+# --------------------------------------------------------------------------- #
+async def try_dm(
+    user: discord.abc.User,
+    content: str | None = None,
+    *,
+    embed: discord.Embed | None = None,
+    view: discord.ui.View | None = None,
+    file: discord.File | None = None,
+) -> bool:
+    """Best-effort DM to a member/user. Returns True if it went through, False if
+    their DMs are closed or Discord refused — never raises.
+
+    (discord.Forbidden is a subclass of HTTPException, so one except covers the
+    "DMs closed" and transient-failure cases the callers all treated alike.)
+    """
+    try:
+        await user.send(content=content, embed=embed, view=view, file=file)
+        return True
+    except discord.HTTPException:
+        return False
 
 
 # --------------------------------------------------------------------------- #

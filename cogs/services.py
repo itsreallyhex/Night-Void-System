@@ -6,7 +6,6 @@ an embed. The user receives an ephemeral confirmation.
 """
 
 import logging
-from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
@@ -90,14 +89,14 @@ class Services(commands.Cog):
         embed = discord.Embed(
             title="طلب خدمة جديد",
             color=branding.WARNING,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=utilities.utc_now(),
         )
         embed.add_field(name="طلبها", value=interaction.user.mention, inline=True)
         embed.add_field(name="آيدي العضو", value=str(interaction.user.id), inline=True)
         embed.add_field(name="الخدمة", value=service, inline=False)
         embed.add_field(name="التفاصيل", value=details, inline=False)
         embed.add_field(name="الكريدت المصروف", value=f"{cost:,}", inline=False)
-        embed.set_footer(text=f"{branding.FOOTER} • الخدمات")
+        utilities.brand_footer(embed, "الخدمات")
 
         try:
             await channel.send(embed=embed)

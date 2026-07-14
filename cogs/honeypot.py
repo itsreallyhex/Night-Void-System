@@ -141,7 +141,7 @@ class Honeypot(commands.Cog):
         embed.add_field(
             name="الحالة", value="🟢 مفعّل" if enabled else "🔴 معطّل", inline=True
         )
-        embed.set_footer(text=f"{branding.FOOTER} • المصيدة")
+        utilities.brand_footer(embed, "المصيدة")
         return embed
 
     async def _update_embed(self, row, count: int) -> None:
