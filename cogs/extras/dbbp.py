@@ -23,6 +23,10 @@ log = logging.getLogger("nightvoid.extras.dbbp")
 # Discord rejects bot uploads over 10 MB — warn before wasting the attempt.
 UPLOAD_LIMIT = 10 * 1024 * 1024
 
+# Shared with the Owner cog (!output): whether replies go private (DM) or into
+# the channel. Kept as a literal here so this drop-in stays import-independent.
+OUTPUT_MODE_KEY = "owner_output_mode"
+
 
 class DbBackup(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
@@ -39,7 +43,7 @@ class DbBackup(commands.Cog):
         # Anything else means NO backup was delivered — say so, never fail
         # silently, or the owner walks away believing a copy exists.
         log.exception("dbbp command error", exc_info=error)
-        await self._dm(
+        await self._deliver(
             ctx,
             "🚨 فشل أخذ النسخة الاحتياطية — ما تم إرسال أي ملف. "
             "شوف سجلات Railway للتفاصيل وحاول مرة ثانية.",
@@ -47,10 +51,11 @@ class DbBackup(commands.Cog):
 
     @commands.command(name="dbbp", aliases=["dbbackup", "backup"])
     async def dbbp(self, ctx: commands.Context) -> None:
-        """Snapshot the database and DM it to the owner."""
-        # Same privacy pattern as the Owner cog: the invoking message
-        # disappears and the backup goes to DMs, never into a channel.
-        if ctx.guild is not None:
+        """Snapshot the database and deliver it (DM or channel, per !output)."""
+        private = await self._private_mode()
+        # In private mode the invoking message disappears; in channel mode it's
+        # left, since the backup is going into that channel on purpose anyway.
+        if private and ctx.guild is not None:
             try:
                 await ctx.message.delete()
             except discord.HTTPException:
@@ -65,7 +70,7 @@ class DbBackup(commands.Cog):
             size = os.path.getsize(path)
 
             if size > UPLOAD_LIMIT:
-                await self._dm(
+                await self._deliver(
                     ctx,
                     f"⚠️ النسخة الاحتياطية حجمها {size / 1024 / 1024:.1f} MB — "
                     f"أكبر من حد رفع ديسكورد. خذها من Railway مباشرة "
@@ -73,40 +78,52 @@ class DbBackup(commands.Cog):
                 )
                 return
 
+            target = ctx.author if private else ctx.channel
             try:
-                await ctx.author.send(
+                await target.send(
                     f"🗄️ نسخة احتياطية من قاعدة البيانات — "
                     f"{size / 1024:.0f} KB\n"
                     f"للاسترجاع: ارفعها مكان `/data/store.db` وأعد تشغيل البوت.",
                     file=discord.File(path, filename=filename),
                 )
             except discord.Forbidden:
-                await self._dm(ctx, None)  # DMs closed — fall through to notice
+                # DMs closed (private) or no send perms (channel) — leave a notice.
+                await self._deliver(ctx, None)
                 return
             except discord.HTTPException as exc:
                 # Discord refused the upload anyway (its real limit varies,
                 # error 40005 = entity too large) — report instead of vanishing.
                 log.warning("dbbp upload rejected (%s bytes): %s", size, exc)
-                await self._dm(
+                await self._deliver(
                     ctx,
                     f"🚨 ديسكورد رفض رفع الملف ({size / 1024 / 1024:.1f} MB) — "
                     f"ما تم إرسال نسخة. خذها من Railway مباشرة (`/data/store.db`).",
                 )
                 return
 
-        log.info("Database backup (%s bytes) DMed to owner %s", size, ctx.author.id)
+        log.info("Database backup (%s bytes) delivered to owner %s", size, ctx.author.id)
 
-    async def _dm(self, ctx: commands.Context, content: str | None) -> None:
-        """DM `content`, or if DMs are closed leave a self-destructing notice."""
+    async def _private_mode(self) -> bool:
+        """Whether replies should go to the owner's DMs (True) or the channel
+        (False). Set with the Owner cog's !output command."""
+        return (await self.db.get_setting(OUTPUT_MODE_KEY, "private")) != "channel"
+
+    async def _deliver(self, ctx: commands.Context, content: str | None) -> None:
+        """Send `content` to the DM or the channel per the current mode; if that
+        target refuses (DMs closed / no send perms), leave a self-destructing
+        in-channel notice so a failure is never silent."""
+        private = await self._private_mode()
+        target = ctx.author if private else ctx.channel
         if content is not None:
             try:
-                await ctx.author.send(content)
+                await target.send(content)
                 return
             except discord.Forbidden:
                 pass
         try:
             await ctx.send(
-                "⚠️ ما أقدر أرسل لك خاص — فعّل **الرسائل الخاصة** وأعد المحاولة.",
+                "⚠️ ما قدرت أوصّل الرد — فعّل **الرسائل الخاصة** أو استخدم "
+                "`!output here` عشان تجيك بالقناة.",
                 delete_after=15,
             )
         except discord.HTTPException:

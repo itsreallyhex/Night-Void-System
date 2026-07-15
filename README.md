@@ -25,7 +25,7 @@ SQLite (`aiosqlite`) — one cog per system, nothing fancier than that.
 | 7 | **Minor services** | Spend a fixed amount of credits to file a service request to staff via a modal. |
 | 8 | **Verify gate** | New members are held behind a hold role that hides every channel except the gate; a persistent button reveals the server and grants the verified role. New channels are auto-hidden from held members as the server grows. |
 | 9 | **Honeypot channel** | One designated bait channel with zero legitimate traffic. Any message posted there triggers an automatic penalty (kick, ban, remove roles, timeout, or alert-only) — the classic sign of a compromised account or spam bot. Keeps only a bare trigger counter, by design: no per-incident log of who or when. |
-| — | **Owner tools** | Private prefix commands (`!`) to grant/set/inspect credits, dump a full DB overview, back up the database, and restart the bot. |
+| — | **Owner tools** | Private prefix commands (`!`) to grant/set/inspect credits, dump a full DB overview, back up the database, and restart the bot. Replies DM you privately by default; `!output here` switches them (and backups) to the channel. |
 | — | **Leave cleanup** | When a member leaves: their open ticket closes immediately and their balance burns after a **24 h grace period** (rejoining in time keeps everything). |
 | — | **Extras (drop-ins)** | Any `.py` file dropped into `cogs/extras/` auto-loads at startup — no registration needed. |
 
@@ -94,8 +94,11 @@ three actions:
 
 ### Owner prefix commands (`!`)
 
-Owner-only, invisible to everyone else. Each deletes your message and DMs the
-result back so nobody sees the command or its output.
+Owner-only, invisible to everyone else. By **default** each deletes your message
+and DMs the result back so nobody sees the command or its output. `!output here`
+flips every owner command **and the `!dbbp` backup** to reply in the channel
+instead (and keep your message); `!output private` restores the default. The
+choice is stored in the DB, so it persists across restarts.
 
 | Command | Purpose |
 |---------|---------|
@@ -105,10 +108,16 @@ result back so nobody sees the command or its output.
 | `!credits @user` | Show a member's balance + recent purchases |
 | `!purchases @user` | Full purchase history |
 | `!db` | Full database snapshot (owner's own account excluded from economy totals) |
-| `!dbbp` | Snapshot the live database (`VACUUM INTO`) and DM it as a backup file (aliases: `!dbbackup`, `!backup`) |
+| `!dbbp` | Snapshot the live database (`VACUUM INTO`) and send it as a backup file — private DM by default, or into the channel per `!output` (aliases: `!dbbackup`, `!backup`) |
+| `!output [here \| private]` | Choose where owner replies + backups go: the channel or a private DM (default). No argument shows the current mode (aliases: `!outputmode`, `!sendmode`) |
 | `!tickreset` | Reset the ticket counter back to #1 (refuses while a ticket is open) |
+| `!hpreset` | Zero the honeypot trigger counter (aliases: `!honeypotreset`) |
 | `!restart` | Cleanly restart the bot process — flushes the DB, then re-execs in place (aliases: `!rest`, `!reboot`) |
 | `!nvhelp` | List owner commands |
+
+> **Careful with `!output here` + `!dbbp`:** the backup file is the entire
+> economy (balances, tickets, reviews, codes). In channel mode anyone who can
+> read that channel can download it — only use it in a private owner/staff channel.
 
 **`!dmall <message>`** breaks the pattern: it's gated to the Developer-Portal
 team instead of the owner, so anyone with team access can DM every human

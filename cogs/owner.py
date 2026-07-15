@@ -17,6 +17,11 @@ from amounts import AmountConverter
 
 log = logging.getLogger("nightvoid.owner")
 
+# Where owner-command (and backup) replies go: DM the owner privately, or post
+# in the channel the command was run in. Persisted so it survives restarts and
+# is shared with the backup cog (cogs/extras/dbbp.py reads the same key).
+OUTPUT_MODE_KEY = "owner_output_mode"
+
 
 class Owner(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
@@ -30,7 +35,17 @@ class Owner(commands.Cog):
     async def _private(
         self, ctx: commands.Context, content: str | None = None, *, embed: discord.Embed | None = None
     ) -> None:
-        """Delete the invoking message (in guilds) and DM the response to the owner."""
+        """Deliver a command's reply. In the default 'private' mode the invoking
+        message is deleted and the reply is DM'd to the owner; in 'channel' mode
+        the reply is posted in the channel and the message is left intact.
+        Mode is set with !output and read from the database."""
+        if (await self.db.get_setting(OUTPUT_MODE_KEY, "private")) == "channel":
+            try:
+                await ctx.send(content=content, embed=embed)
+            except discord.HTTPException:
+                log.warning("Could not post owner reply in channel %s", ctx.channel.id)
+            return
+
         if ctx.guild is not None:
             try:
                 await ctx.message.delete()
@@ -43,7 +58,7 @@ class Owner(commands.Cog):
             try:
                 await ctx.send(
                     "⚠️ ما أقدر أرسل لك خاص — فعّل **الرسائل الخاصة** من إعدادات "
-                    "الخصوصية عشان ردود المالك تبقى خاصة.",
+                    "الخصوصية، أو خلّي الردود بالقناة بـ `!output here`.",
                     delete_after=15,
                 )
             except discord.HTTPException:
@@ -175,6 +190,46 @@ class Owner(commands.Cog):
         log.info("Owner reset the honeypot counter.")
 
     # ------------------------------------------------------------------ #
+    # Output mode: private DM vs. in-channel
+    # ------------------------------------------------------------------ #
+    @commands.command(name="output", aliases=["outputmode", "sendmode"])
+    async def output_mode(self, ctx: commands.Context, mode: str | None = None) -> None:
+        """Choose where owner-command and backup replies go.
+        Usage:  !output          -> show the current mode
+                !output private  -> DM you, delete your message (default)
+                !output here     -> post in the channel it's run in"""
+        private_words = {"private", "dm", "خاص"}
+        channel_words = {"here", "channel", "public", "قناة"}
+
+        if mode is None:
+            current = await self.db.get_setting(OUTPUT_MODE_KEY, "private")
+            label = "القناة" if current == "channel" else "الخاص (DM)"
+            await self._private(
+                ctx,
+                f"📤 وضع الإخراج الحالي: **{label}**.\n"
+                "غيّره بـ `!output here` (بالقناة) أو `!output private` (خاص).",
+            )
+            return
+
+        m = mode.strip().lower()
+        if m in channel_words:
+            await self.db.set_setting(OUTPUT_MODE_KEY, "channel")
+            await self._private(
+                ctx,
+                "✅ من الحين ردود أوامر المالك والنسخة الاحتياطية **تنكتب في القناة** "
+                "(ورسالتك ما تنحذف).",
+            )
+        elif m in private_words:
+            await self.db.set_setting(OUTPUT_MODE_KEY, "private")
+            await self._private(
+                ctx, "✅ رجعت الردود **خاص (DM)** ورسالتك تنحذف تلقائياً."
+            )
+        else:
+            await self._private(ctx, "⚠️ اكتب `here` (بالقناة) أو `private` (خاص).")
+            return
+        log.info("Owner %s set output mode -> %s", ctx.author, m)
+
+    # ------------------------------------------------------------------ #
     # Database overview
     # ------------------------------------------------------------------ #
     @commands.command(name="db", aliases=["database", "dbinfo", "dbstats"])
@@ -247,7 +302,10 @@ class Owner(commands.Cog):
         """List the owner commands."""
         embed = discord.Embed(
             title="أوامر المالك",
-            description="كل الردود تجيك خاص ورسالتك تنحذف، عشان ما يشوفها غيرك.",
+            description=(
+                "الردود تجيك **خاص** ورسالتك تنحذف افتراضياً. تقدر تخليها "
+                "بالقناة بـ `!output here`."
+            ),
             color=branding.NEUTRAL,
         )
         embed.add_field(name="!give @user <مبلغ>", value="إضافة كريدت (يقبل 1k / 2.5m)", inline=False)
@@ -256,7 +314,8 @@ class Owner(commands.Cog):
         embed.add_field(name="!credits @user", value="عرض الرصيد + آخر المشتريات", inline=False)
         embed.add_field(name="!purchases @user", value="كل سجل المشتريات", inline=False)
         embed.add_field(name="!db", value="نظرة كاملة على قاعدة البيانات", inline=False)
-        embed.add_field(name="!dbbp", value="نسخة احتياطية من قاعدة البيانات (توصلك خاص)", inline=False)
+        embed.add_field(name="!dbbp", value="نسخة احتياطية من قاعدة البيانات (خاص أو بالقناة حسب `!output`)", inline=False)
+        embed.add_field(name="!output here / private", value="وين تجيك الردود: بالقناة أو خاص (الافتراضي خاص)", inline=False)
         embed.add_field(name="!tickreset", value="تصفير عداد التذاكر (يبدأ من #1)", inline=False)
         embed.add_field(name="!hpreset", value="تصفير عدّاد المصيدة", inline=False)
         embed.add_field(name="!restart", value="إعادة تشغيل البوت (أو `!rest`)", inline=False)
