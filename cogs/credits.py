@@ -151,21 +151,28 @@ class Credits(commands.Cog):
     )
     async def leaderboard(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
-        rows = await self.db.top_balances(10, exclude=[config.OWNER_USER_ID])
-        if not rows:
+        guild = interaction.guild
+        # Pull a wider pool than we show, then drop anyone who has left the
+        # server, so the board is always 10 *current* members even when top
+        # holders have gone (their balances are burned later by the leavers
+        # system; this only keeps them off the board immediately).
+        rows = await self.db.top_balances(50, exclude=[config.OWNER_USER_ID])
+        present = [
+            row for row in rows
+            if guild is not None and guild.get_member(row["user_id"]) is not None
+        ][:10]
+        if not present:
             await interaction.followup.send(
                 "📊 ما فيه أحد عنده كريدت لين الحين.", ephemeral=True
             )
             return
 
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-        guild = interaction.guild
         lines: list[str] = []
-        for rank, row in enumerate(rows, start=1):
-            member = guild.get_member(row["user_id"]) if guild else None
-            who = member.mention if member else f"<@{row['user_id']}>"
+        for rank, row in enumerate(present, start=1):
+            member = guild.get_member(row["user_id"])
             badge = medals.get(rank, f"**{rank}.**")
-            lines.append(f"{badge} {who} — **{row['balance']:,}** كريدت")
+            lines.append(f"{badge} {member.mention} — **{row['balance']:,}** كريدت")
 
         embed = discord.Embed(
             title="أعلى 10 في الكريدت",
